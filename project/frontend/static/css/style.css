@@ -1,0 +1,13 @@
+body { background: #f7f7fb; }
+.card { box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+
+.chatbot { position: fixed; bottom: 20px; right: 20px; width: 320px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; }
+.chat-header { background: #0d6efd; color: #fff; padding: 10px; font-weight: 600; }
+.chat-log { height: 240px; padding: 10px; overflow-y: auto; background: #fafafa; }
+.chat-entry { margin-bottom: 8px; }
+.chat-entry.user { text-align: right; }
+.chat-entry .bubble { display: inline-block; padding: 8px 10px; border-radius: 12px; max-width: 85%; }
+.chat-entry.user .bubble { background: #0d6efd; color: #fff; }
+.chat-entry.bot .bubble { background: #e9ecef; color: #212529; }
+.chat-input { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #eee; }
+.chat-input input { flex: 1; border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; }
