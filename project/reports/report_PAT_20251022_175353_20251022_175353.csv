@@ -1,0 +1,2 @@
+patient_id,timestamp,class,confidence,severity,is_wrong_image
+PAT_20251022_175353,2025-10-22T17:53:53.154734Z,Wrong Image — Not a Skin Lesion,0.125,NONE,True

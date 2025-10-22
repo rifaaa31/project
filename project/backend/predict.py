@@ -15,6 +15,7 @@ except Exception:
     _TF_AVAILABLE = False
 
 CONFIDENCE_THRESHOLD: float = 0.80
+_CONFIG_LOADED = False
 
 
 def _backend_dirs() -> Tuple[str, str]:
@@ -35,6 +36,8 @@ def _load_labels(model_dir: str) -> list:
 class ModelHolder:
     _model = None
     _labels = None
+    _threshold = None
+    _image_size = (64, 64)
 
     @classmethod
     def get_model_and_labels(cls):
@@ -54,6 +57,22 @@ class ModelHolder:
         if cls._labels is None:
             _, model_dir = _backend_dirs()
             cls._labels = _load_labels(model_dir)
+        # Load threshold/config if available
+        if cls._threshold is None:
+            _, model_dir = _backend_dirs()
+            config_path = os.path.join(model_dir, "config.json")
+            thr = None
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r") as f:
+                        cfg = json.load(f)
+                    thr = float(cfg.get("confidence_threshold", CONFIDENCE_THRESHOLD))
+                    size = cfg.get("image_size")
+                    if isinstance(size, (list, tuple)) and len(size) == 2:
+                        cls._image_size = (int(size[0]), int(size[1]))
+                except Exception:
+                    thr = None
+            cls._threshold = thr if thr is not None else CONFIDENCE_THRESHOLD
         return cls._model, cls._labels
 
 
@@ -81,13 +100,16 @@ def severity_for(label: str) -> str:
 
 def predict_from_pil(image: Image.Image) -> Dict:
     model, labels = ModelHolder.get_model_and_labels()
-    arr = preprocess_image(image)
+    # Use configured image size if available
+    target_size = ModelHolder._image_size if isinstance(ModelHolder._image_size, tuple) else (64, 64)
+    arr = preprocess_image(image, target_size=target_size)
     probs = model.predict(arr, verbose=0)[0]
     top_index = int(np.argmax(probs))
     top_prob = float(probs[top_index])
     predicted_label = labels[top_index]
 
-    if top_prob < CONFIDENCE_THRESHOLD:
+    threshold = ModelHolder._threshold if ModelHolder._threshold is not None else CONFIDENCE_THRESHOLD
+    if top_prob < threshold:
         return {
             "class": "Wrong Image — Not a Skin Lesion",
             "confidence": round(top_prob, 4),

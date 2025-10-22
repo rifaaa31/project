@@ -1,4 +1,5 @@
-body { background: #f7f7fb; }
+:root[data-bs-theme="light"] body { background: #f7f7fb; }
+:root[data-bs-theme="dark"] body { background: #0b0e14; color: #e9ecef; }
 .card { box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 
 .chatbot { position: fixed; bottom: 20px; right: 20px; width: 320px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; }

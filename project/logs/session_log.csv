@@ -1,0 +1,2 @@
+timestamp,image_path,class,confidence,severity,is_wrong_image
+2025-10-22T17:53:53.154734Z,/workspace/project/uploads/1761155633_random.jpg,Wrong Image — Not a Skin Lesion,0.125,NONE,True
