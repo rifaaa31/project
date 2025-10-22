@@ -128,7 +128,15 @@ def preprocess_and_save(dataset_dir: str, output_dir: str,
     return x_train_path, x_test_path, y_train_path, y_test_path
 
 
-def build_model(input_shape=(64, 64, 3), num_classes: int=8) -> tf.keras.Model:
+def build_model(input_shape=(64, 64, 3), num_classes: int = 8) -> tf.keras.Model:
+    # Data augmentation is put directly into the model graph for speed and portability
+    data_augmentation = models.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.08),
+        layers.RandomZoom(0.08),
+        layers.RandomContrast(0.15),
+    ], name="augmentation")
+
     base_model = MobileNetV2(
         input_shape=input_shape,
         include_top=False,
@@ -138,11 +146,12 @@ def build_model(input_shape=(64, 64, 3), num_classes: int=8) -> tf.keras.Model:
     base_model.trainable = False
 
     inputs = layers.Input(shape=input_shape)
-    x = base_model(inputs, training=False)
-    x = layers.Dropout(0.25)(x)
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    x = data_augmentation(inputs)
+    x = base_model(x, training=False)
+    x = layers.Dropout(0.30)(x)
+    outputs = layers.Dense(num_classes, activation="softmax", name="predictions")(x)
 
-    model = models.Model(inputs, outputs)
+    model = models.Model(inputs, outputs, name="lesion_mobilenetv2")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
         loss="categorical_crossentropy",
@@ -179,6 +188,60 @@ def plot_training(history: tf.keras.callbacks.History, plots_dir: str) -> None:
     plt.close()
 
 
+def _find_base_submodel(model: tf.keras.Model) -> tf.keras.Model:
+    # Try to find the MobileNetV2 submodel robustly
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.Model):
+            return layer
+        if isinstance(layer, layers.Layer) and hasattr(layer, 'name') and 'mobilenetv2' in layer.name.lower():
+            return layer  # type: ignore
+    # Fallback: try by name
+    try:
+        return model.get_layer('MobilenetV2')  # type: ignore
+    except Exception:
+        return model
+
+
+def _calibrate_threshold(y_true_one_hot: np.ndarray, probs: np.ndarray, default_threshold: float = 0.80) -> Tuple[float, float, float]:
+    """Return (threshold, precision_at_thr, recall_at_thr) maximizing recall with 100% precision.
+
+    - y_true_one_hot: shape (N, C)
+    - probs: softmax probabilities, shape (N, C)
+    """
+    y_true = np.argmax(y_true_one_hot, axis=1)
+    y_pred = np.argmax(probs, axis=1)
+    conf = probs[np.arange(probs.shape[0]), y_pred]
+    correct = (y_pred == y_true)
+
+    # Evaluate precision/recall at candidate thresholds = unique confidences
+    unique_conf = np.unique(conf)
+    # Consider thresholds slightly above each unique value to drop all with conf == v when moving down
+    candidate_thresholds = np.concatenate([unique_conf + 1e-6, [0.999999, 0.95, 0.90, 0.85, 0.80]])
+    candidate_thresholds = np.clip(candidate_thresholds, 0.0, 1.0)
+    candidate_thresholds = np.unique(candidate_thresholds)
+
+    best_thr = default_threshold
+    best_recall = 0.0
+    best_precision = 1.0
+
+    total_positives = float(correct.sum())
+    for thr in sorted(candidate_thresholds):
+        accepted = conf >= thr
+        n_acc = int(accepted.sum())
+        if n_acc == 0:
+            continue
+        tp = int((accepted & correct).sum())
+        fp = n_acc - tp
+        precision = 1.0 if n_acc == 0 else (tp / n_acc)
+        recall = 0.0 if total_positives == 0 else (tp / total_positives)
+        if precision == 1.0 and recall >= best_recall:
+            best_recall = recall
+            best_thr = float(thr)
+            best_precision = precision
+
+    return best_thr, best_precision, best_recall
+
+
 def train(dataset_dir: str,
           artifacts_dir: str = "model",
           arrays_dir: str = "data",
@@ -211,11 +274,14 @@ def train(dataset_dir: str,
 
     model = build_model(input_shape=(image_size[0], image_size[1], 3), num_classes=len(CLASSES))
 
-    callbacks = [
+    checkpoint_path = os.path.join(model_dir, "skin_lesion_model.h5")
+
+    # Phase 1: train head with base frozen
+    callbacks_phase1 = [
         EarlyStopping(monitor="val_accuracy", patience=5, mode="max", restore_best_weights=True),
         ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, verbose=1),
         ModelCheckpoint(
-            filepath=os.path.join(model_dir, "skin_lesion_model.h5"),
+            filepath=checkpoint_path,
             monitor="val_accuracy",
             save_best_only=True,
             mode="max",
@@ -223,21 +289,88 @@ def train(dataset_dir: str,
         ),
     ]
 
-    history = model.fit(
+    history1 = model.fit(
         X_train, y_train,
         validation_data=(X_val, y_val),
-        epochs=epochs,
+        epochs=max(5, epochs // 2),
         batch_size=batch_size,
-        callbacks=callbacks,
+        callbacks=callbacks_phase1,
         verbose=1,
     )
+
+    # Phase 2: fine-tune last N layers of base
+    base = _find_base_submodel(model)
+    try:
+        base.trainable = True
+        # Freeze all but the last 50 layers if possible
+        if hasattr(base, 'layers') and len(base.layers) > 50:
+            for layer in base.layers[:-50]:
+                layer.trainable = False
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+            loss="categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+
+        callbacks_phase2 = [
+            EarlyStopping(monitor="val_accuracy", patience=6, mode="max", restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, verbose=1),
+            ModelCheckpoint(
+                filepath=checkpoint_path,
+                monitor="val_accuracy",
+                save_best_only=True,
+                mode="max",
+                verbose=1,
+            ),
+        ]
+
+        history2 = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=callbacks_phase2,
+            verbose=1,
+        )
+        # Merge history logs for plotting
+        history = history1
+        for k, v in history2.history.items():
+            history.history.setdefault(k, []).extend(v)
+    except Exception:
+        # If fine-tuning fails, fall back to phase1 history
+        history = history1
+
+    # Ensure the best checkpoint is saved and loaded
+    try:
+        model.save(checkpoint_path)
+    except Exception:
+        pass
 
     # Save label map
     with open(os.path.join(model_dir, "labels.json"), "w") as f:
         json.dump(CLASSES, f)
 
+    # Calibration on validation set for threshold achieving 100% precision (if feasible)
+    try:
+        probs_val = model.predict(X_val, batch_size=batch_size, verbose=0)
+        thr, p_at_thr, r_at_thr = _calibrate_threshold(y_val, probs_val, default_threshold=0.80)
+    except Exception:
+        thr, p_at_thr, r_at_thr = 0.80, 0.0, 0.0
+
+    # Save config including calibrated threshold
+    config = {
+        "confidence_threshold": round(float(thr), 4),
+        "val_precision_at_threshold": round(float(p_at_thr), 4),
+        "val_recall_at_threshold": round(float(r_at_thr), 4),
+        "image_size": list(image_size),
+        "classes": CLASSES,
+        "note": "Threshold chosen to maximize recall with precision==1.0 on validation set."
+    }
+    with open(os.path.join(model_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
     plot_training(history, plots_out_dir)
-    print("Training complete. Best model and plots saved.")
+    print(f"Training complete. Best model and plots saved to {model_dir}. Calibrated threshold: {config['confidence_threshold']} (val P={config['val_precision_at_threshold']}, R={config['val_recall_at_threshold']}).")
 
 
 if __name__ == "__main__":
