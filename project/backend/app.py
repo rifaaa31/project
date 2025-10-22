@@ -8,7 +8,11 @@ from typing import Dict, Any
 from flask import Flask, request, render_template, jsonify, send_file, Response
 from werkzeug.utils import secure_filename
 
-import cv2
+# Optional OpenCV: degrade gracefully if unavailable
+try:
+    import cv2  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    cv2 = None  # type: ignore
 import numpy as np
 from PIL import Image
 
@@ -89,9 +93,22 @@ def predict_route():
 @app.route("/camera")
 def camera_stream():
     def gen():
+        if cv2 is None:
+            # Provide a blank frame with message if camera not available
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            # Fallback text rendering without cv2: place a red stripe
+            blank[:, :20] = (0, 0, 255)
+            # Encode using PIL since cv2 is missing
+            img = Image.fromarray(blank)
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            frame = buf.getvalue()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            return
+
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            # Provide a blank frame with message if camera not available
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(blank, "Camera not available", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             _, buffer = cv2.imencode('.jpg', blank)
@@ -171,7 +188,10 @@ def download_report():
         return send_file(csv_path, as_attachment=True, download_name=os.path.basename(csv_path))
 
     # Default: PDF via fpdf
-    from fpdf import FPDF
+    try:
+        from fpdf import FPDF
+    except Exception as e:  # pragma: no cover
+        return jsonify({"error": f"PDF generation unavailable: {e}"}), 500
 
     pdf = FPDF()
     pdf.add_page()
